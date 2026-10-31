@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crescendo — an arousal engine study (18+)</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0d0208; color: #eaeaea;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  main { min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px; padding: 16px;
+    box-sizing: border-box; }
+  canvas { width: min(92vmin, 720px); height: min(92vmin, 720px);
+    background: #0d0208; border: 1px solid #540e46; touch-action: none; }
+  p { margin: 0; font-size: 13px; color: #ac9393; text-align: center;
+    max-width: 720px; line-height: 1.5; }
+  .pink { color: #ff2e88; }
+</style>
+</head>
+<body>
+<main>
+  <canvas id="game" width="960" height="960"></canvas>
+  <p><span class="pink">CRESCENDO</span> — 18+ only. Arousal-engine/1, run honestly.
+  HOLD SPACE (or press and hold) to build each tier's rise; RELEASE at the edge —
+  holding there slips her. Reach the target tier and culmination comes exactly
+  once. Arrows choose, ENTER confirms, P pauses. Sound is generated live and
+  only ever answers your own input.</p>
+  <p id="records"></p>
+</main>
+<script type="module">
+/*__GAME_MJS__*/
+
+const params = new URLSearchParams(location.search);
+const demoLevel = params.has("demo") ? Number(params.get("demo")) : null;
+const seed = params.has("seed") ? Number(params.get("seed")) : 20266;
+const girlParam = params.has("girl") ? Number(params.get("girl")) : 0;
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+const game = await createGame(null, {
+  seed,
+  level: demoLevel ?? 0,
+  demo: demoLevel !== null,
+  girl: Number.isInteger(girlParam) ? girlParam : 0,
+});
+if (demoLevel !== null) game.startLevel(demoLevel);
+
+// --- persistence: settings + session records live in localStorage; the
+// core restores both through its bridges at boot. ---
+const LS_KEY = "crescendo-save-v1";
+let save = { weatherReduced: false, textLarge: false, wins: 0, bestTier: 0 };
+try { save = { ...save, ...JSON.parse(localStorage.getItem(LS_KEY) ?? "{}") }; } catch { /* fresh save */ }
+game.applySettings(save.weatherReduced, save.textLarge);
+game.applyRecords(save.wins, save.bestTier);
+let lastSettingsBits = game.settingsBits();
+let lastScreen = game.screen();
+function persist() { try { localStorage.setItem(LS_KEY, JSON.stringify(save)); } catch { /* private mode */ } }
+function noteScreen() {
+  const s = game.screen();
+  const bits = game.settingsBits();
+  if (bits !== lastSettingsBits) {
+    lastSettingsBits = bits;
+    save.weatherReduced = (bits & 1) !== 0;
+    save.textLarge = (bits & 2) !== 0;
+    persist();
+  }
+  if (s !== lastScreen) {
+    if (s === 6) {
+      save.wins = game.recordsWins();
+      save.bestTier = game.recordsBest();
+      persist();
+      renderRecords();
+    }
+    lastScreen = s;
+  }
+}
+function renderRecords() {
+  const el = document.getElementById("records");
+  if (!el) return;
+  el.textContent = save.wins > 0
+    ? `The record: ${save.wins} sessions won · best tier ${save.bestTier}`
+    : "";
+}
+renderRecords();
+
+// --- input: HOLD is a state (space / pointer held down); navigation
+// keys are pulses. The core edge-detects pulses itself. ---
+let heldBits = 0;
+let pendingInput = 0;
+function pulse(bits) { pendingInput |= bits; ensureAudio(); }
+canvas.addEventListener("pointerdown", () => { heldBits |= INPUT.hold; pulse(INPUT.confirm); });
+addEventListener("pointerup", () => { heldBits &= ~INPUT.hold; });
+addEventListener("keydown", (e) => {
+  if (e.code === "Space") { heldBits |= INPUT.hold; ensureAudio(); e.preventDefault(); return; }
+  if (e.repeat) return;
+  if (e.code === "Enter") pulse(INPUT.confirm);
+  else if (e.code === "ArrowUp") pulse(INPUT.up);
+  else if (e.code === "ArrowDown") pulse(INPUT.down);
+  else if (e.code === "ArrowLeft") pulse(INPUT.left);
+  else if (e.code === "ArrowRight") pulse(INPUT.right);
+  else if (e.code === "KeyP") pulse(INPUT.pause);
+  else if (e.code === "Escape") pulse(INPUT.pause | INPUT.back);
+  else if (e.code === "Backspace") pulse(INPUT.back);
+});
+addEventListener("keyup", (e) => {
+  if (e.code === "Space") heldBits &= ~INPUT.hold;
+});
+
+// --- audio: generated WebAudio, created only after a user gesture, and
+// only ever in response to core events that input caused. Silence rule:
+// nothing autoplays; demo mode never initialises audio. ---
+let audio = null;
+function ensureAudio() {
+  if (demoLevel !== null) return;
+  if (audio) { if (audio.state === "suspended") audio.resume(); return; }
+  try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch { audio = null; }
+}
+function tone(freq, dur, type = "sine", gain = 0.12, when = 0) {
+  if (!audio) return;
+  const t0 = audio.currentTime + when;
+  const osc = audio.createOscillator();
+  const g = audio.createGain();
+  osc.type = type; osc.frequency.value = freq;
+  g.gain.setValueAtTime(gain, t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  osc.connect(g).connect(audio.destination);
+  osc.start(t0); osc.stop(t0 + dur);
+}
+function sonify(eventCode) {
+  if (eventCode & 1) tone(587, 0.09, "sine", 0.1);                       // tier / edge reached
+  if (eventCode & 32) tone(196, 0.25, "triangle", 0.11);                 // slip
+  if (eventCode & 2) { tone(523, 0.2); tone(784, 0.3, "sine", 0.12, 0.12); tone(1046, 0.5, "sine", 0.12, 0.24); } // peak
+  if (eventCode & 4) tone(392, 0.4, "sine", 0.08);                       // daze settles
+  if (eventCode & 8) { tone(523, 0.14); tone(659, 0.14, "sine", 0.11, 0.12); tone(784, 0.34, "sine", 0.11, 0.24); } // victory
+  if (eventCode & 16) tone(147, 0.5, "triangle", 0.1);                   // session ended
+}
+
+// --- painting: the core's draw list, interpreted on canvas. ---
+function paint(frame) {
+  for (const op of frame.ops) {
+    const kind = op[0];
+    const ci = kind === "t" ? op[4] : op[op.length - 1];
+    ctx.fillStyle = frame.palette[ci] ?? "#ff2e88";
+    ctx.strokeStyle = ctx.fillStyle;
+    if (kind === "r") ctx.fillRect(op[1], op[2], op[3], op[4]);
+    else if (kind === "c") { ctx.beginPath(); ctx.arc(op[1], op[2], op[3], 0, 6.2832); ctx.fill(); }
+    else if (kind === "l") {
+      ctx.lineWidth = op[5]; ctx.beginPath(); ctx.moveTo(op[1], op[2]); ctx.lineTo(op[3], op[4]); ctx.stroke();
+    } else if (kind === "p") {
+      ctx.beginPath(); ctx.moveTo(op[1], op[2]); ctx.lineTo(op[3], op[4]); ctx.lineTo(op[5], op[6]);
+      ctx.closePath(); ctx.fill();
+    } else if (kind === "t") {
+      ctx.font = `${op[3]}px ui-monospace, Menlo, monospace`;
+      ctx.textBaseline = "top";
+      ctx.fillText(op[5], op[1], op[2]);
+    }
+  }
+}
+
+// --- fixed-step loop: 16 ms steps, paint the newest frame. ---
+let acc = 0;
+let last = performance.now();
+function loop(now) {
+  acc += Math.min(now - last, 250);
+  last = now;
+  let stepped = false;
+  while (acc >= 16) {
+    const bits = heldBits | pendingInput;
+    pendingInput = 0;
+    game.step(bits);
+    const ev = game.event();
+    if (ev !== 0) sonify(ev);
+    acc -= 16;
+    stepped = true;
+  }
+  if (stepped) { noteScreen(); paint(game.frame()); }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
